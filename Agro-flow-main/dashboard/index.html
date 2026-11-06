@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agro Flow - Painel de Irrigação</title>
+<style>
+  :root {
+    --bg: #f4f6f4; --card: #ffffff; --ink: #1c2b22; --muted: #66756b; --line: #dde4de;
+    --irrigar: #1f7ae0; --chuva: #6b5bd6; --ok: #2e9e5b; --track: #e6ece7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1612; --card: #18211b; --ink: #e8efe9; --muted: #93a398; --line: #2a362d; --track: #26322a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font-family: system-ui, "Segoe UI", sans-serif; }
+  main { max-width: 1000px; margin: 0 auto; padding: 24px 16px 40px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+  h1 { font-size: 20px; margin: 0; }
+  .status { font-size: 13px; color: var(--muted); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); margin-right: 6px; }
+  .dot.off { background: #c0392b; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  #decisao { margin: 16px 0; display: flex; align-items: center; gap: 20px; border-width: 2px; transition: border-color .3s; }
+  #decisao .icone { font-size: 56px; line-height: 1; }
+  #decisao .titulo { font-size: 28px; font-weight: 700; }
+  #decisao .sub { color: var(--muted); margin-top: 4px; }
+  #decisao.irrigar { border-color: var(--irrigar); }
+  #decisao.aguardar_chuva { border-color: var(--chuva); }
+  #decisao.nao_irrigar { border-color: var(--ok); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+  .sensor .nome { color: var(--muted); font-size: 13px; }
+  .sensor .valor { font-size: 30px; font-weight: 700; margin: 4px 0 10px; }
+  .barra { height: 8px; background: var(--track); border-radius: 4px; overflow: hidden; }
+  .barra > i { display: block; height: 100%; width: 0; background: var(--ok); transition: width .5s; }
+  h2 { font-size: 15px; margin: 24px 0 10px; }
+  svg { width: 100%; height: 140px; display: block; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .tag { padding: 2px 8px; border-radius: 10px; font-size: 12px; color: #fff; }
+  .tag.irrigar { background: var(--irrigar); } .tag.aguardar_chuva { background: var(--chuva); } .tag.nao_irrigar { background: var(--ok); }
+  .vazio { color: var(--muted); padding: 12px 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Agro Flow · Painel de Irrigação</h1>
+    <div class="status"><span class="dot off" id="dot"></span><span id="status">aguardando dados…</span></div>
+  </header>
+
+  <section class="card" id="decisao">
+    <div class="icone" id="icone">⏳</div>
+    <div>
+      <div class="titulo" id="titulo">Sem leituras ainda</div>
+      <div class="sub" id="sub">Dispare a DAG <b>agro_irrigacao</b> no Airflow.</div>
+    </div>
+  </section>
+
+  <section class="grid">
+    <div class="card sensor"><div class="nome">Umidade do solo</div><div class="valor" id="v-solo">--</div><div class="barra"><i id="b-solo"></i></div></div>
+    <div class="card sensor"><div class="nome">Umidade do ar</div><div class="valor" id="v-ar">--</div><div class="barra"><i id="b-ar"></i></div></div>
+    <div class="card sensor"><div class="nome">Temperatura</div><div class="valor" id="v-temp">--</div><div class="barra"><i id="b-temp"></i></div></div>
+    <div class="card sensor"><div class="nome">Prob. de chuva</div><div class="valor" id="v-chuva">--</div><div class="barra"><i id="b-chuva"></i></div></div>
+  </section>
+
+  <h2>Umidade do solo nas últimas leituras</h2>
+  <div class="card"><svg id="grafico" viewBox="0 0 600 140" preserveAspectRatio="none"></svg></div>
+
+  <h2>Histórico de decisões</h2>
+  <div class="card">
+    <table>
+      <thead><tr><th>Horário</th><th>Solo</th><th>Ar</th><th>Temp.</th><th>Chuva</th><th>Decisão</th><th>Tempo</th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="vazio" id="vazio">Nenhuma execução registrada.</div>
+  </div>
+</main>
+
+<script>
+const ROTULOS = {
+  irrigar:        { icone: "💧", titulo: "IRRIGANDO",        sub: m => `Irrigação acionada por ${m} min` },
+  aguardar_chuva: { icone: "🌧️", titulo: "AGUARDANDO CHUVA", sub: () => "Irrigação adiada pela previsão de chuva" },
+  nao_irrigar:    { icone: "✅", titulo: "SOLO ADEQUADO",    sub: () => "Nenhuma ação necessária" },
+};
+const $ = id => document.getElementById(id);
+
+function parseCsv(txt) {
+  const linhas = txt.trim().split(/\r?\n/);
+  const cab = linhas.shift().split(",");
+  return linhas.map(l => Object.fromEntries(l.split(",").map((v, i) => [cab[i], v])));
+}
+
+function hora(ts) {
+  const d = new Date(ts);
+  return isNaN(d) ? ts : d.toLocaleTimeString("pt-BR");
+}
+
+function setSensor(id, valor, unidade, max) {
+  $("v-" + id).textContent = valor + unidade;
+  $("b-" + id).style.width = Math.min(100, (valor / max) * 100) + "%";
+}
+
+function desenhaGrafico(linhas) {
+  const svg = $("grafico");
+  const pts = linhas.map(l => +l.umidade_solo);
+  if (pts.length < 2) { svg.innerHTML = ""; return; }
+  const x = i => 10 + (i / (pts.length - 1)) * 580;
+  const y = v => 130 - (v / 100) * 120;
+  const guia = (v, cor) => `<line x1="0" x2="600" y1="${y(v)}" y2="${y(v)}" stroke="${cor}" stroke-dasharray="4 4" opacity=".5"/>`;
+  const linha = pts.map((v, i) => `${i ? "L" : "M"}${x(i)},${y(v)}`).join(" ");
+  const bolas = linhas.map((l, i) => {
+    const cor = { irrigar: "#1f7ae0", aguardar_chuva: "#6b5bd6", nao_irrigar: "#2e9e5b" }[l.acao];
+    return `<circle cx="${x(i)}" cy="${y(pts[i])}" r="4" fill="${cor}"><title>${hora(l.timestamp)} · ${pts[i]}% · ${l.acao}</title></circle>`;
+  }).join("");
+  svg.innerHTML = guia(30, "#c0392b") + guia(40, "#e0a31f") +
+    `<path d="${linha}" fill="none" stroke="currentColor" stroke-width="2" opacity=".6" vector-effect="non-scaling-stroke"/>` + bolas;
+}
+
+function render(dados) {
+  if (!dados.length) return;
+  const u = dados[dados.length - 1];
+  const r = ROTULOS[u.acao] || ROTULOS.nao_irrigar;
+  $("decisao").className = "card " + u.acao;
+  $("icone").textContent = r.icone;
+  $("titulo").textContent = r.titulo;
+  $("sub").textContent = r.sub(u.minutos) + " · leitura das " + hora(u.timestamp);
+  setSensor("solo", u.umidade_solo, "%", 100);
+  setSensor("ar", u.umidade_ar, "%", 100);
+  setSensor("temp", u.temperatura, " °C", 45);
+  setSensor("chuva", u.prob_chuva, "%", 100);
+
+  const recentes = dados.slice(-12);
+  desenhaGrafico(recentes);
+  $("vazio").style.display = "none";
+  $("tbody").innerHTML = dados.slice(-10).reverse().map(l => `
+    <tr><td>${hora(l.timestamp)}</td><td>${l.umidade_solo}%</td><td>${l.umidade_ar}%</td>
+    <td>${l.temperatura} °C</td><td>${l.prob_chuva}%</td>
+    <td><span class="tag ${l.acao}">${l.acao.replace("_", " ")}</span></td>
+    <td>${+l.minutos ? l.minutos + " min" : "-"}</td></tr>`).join("");
+}
+
+async function atualizar() {
+  try {
+    const resp = await fetch("data/historico_irrigacao.csv?t=" + Date.now(), { cache: "no-store" });
+    if (!resp.ok) throw new Error(resp.status);
+    render(parseCsv(await resp.text()));
+    $("dot").className = "dot";
+    $("status").textContent = "atualizado às " + new Date().toLocaleTimeString("pt-BR");
+  } catch (e) {
+    $("dot").className = "dot off";
+    $("status").textContent = "sem dados (DAG ainda não rodou)";
+  }
+}
+
+atualizar();
+setInterval(atualizar, 3000);
+</script>
+</body>
+</html>
